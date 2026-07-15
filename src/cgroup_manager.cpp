@@ -3,7 +3,9 @@
 #include <fstream>
 #include <csignal>
 #include <chrono>
+#include <sstream>
 #include <thread>
+#include <unordered_set>
 #include <utility>
 #include <sys/types.h>
 #include <unistd.h>
@@ -25,6 +27,27 @@ bool CgroupManager::initialize(std::string *error) {
             *error = "cannot create cgroup root " + root_.string() + ": " +
                      status.message();
         }
+        return false;
+    }
+
+    std::ifstream controllers_file(root_ / "cgroup.controllers");
+    std::unordered_set<std::string> controllers;
+    std::string controller;
+    while (controllers_file >> controller) {
+        controllers.insert(controller);
+    }
+    for (const char *required : {"cpu", "memory", "pids"}) {
+        if (!controllers.contains(required)) {
+            if (error != nullptr) {
+                *error = std::string("cgroup controller is not delegated: ") +
+                         required;
+            }
+            return false;
+        }
+    }
+    if (!write_value(root_ / "cgroup.subtree_control",
+                     "+cpu +memory +pids",
+                     error)) {
         return false;
     }
     return true;

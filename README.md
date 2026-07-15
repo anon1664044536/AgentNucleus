@@ -133,6 +133,13 @@ For production, launch `agentd` from a systemd service or scope with cgroup
 delegation and set `RuntimeConfig::cgroup_root` to that delegated subtree.
 Do not make the entire `/sys/fs/cgroup` hierarchy world-writable.
 
+The demo executable also accepts the delegated path through the environment:
+
+```bash
+AGENT_RUNTIME_CGROUP_ROOT=/path/to/delegated/cgroup \
+  ./build/debug/agentd --demo-cgroup
+```
+
 After delegation is configured, the process/cgroup demonstration is:
 
 ```bash

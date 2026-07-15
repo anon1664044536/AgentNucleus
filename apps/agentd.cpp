@@ -1,4 +1,5 @@
 #include <chrono>
+#include <cstdlib>
 #include <iomanip>
 #include <iostream>
 #include <string>
@@ -16,6 +17,9 @@ int run_demo(bool enable_cgroups) {
     ar::RuntimeConfig config;
     config.worker_count = 2;
     config.enable_cgroups = enable_cgroups;
+    if (const char *root = std::getenv("AGENT_RUNTIME_CGROUP_ROOT")) {
+        config.cgroup_root = root;
+    }
     ar::AgentRuntime runtime(config);
 
     runtime.register_handler("demo", [](const ar::AgentSnapshot &agent) {
