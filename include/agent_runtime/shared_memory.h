@@ -1,0 +1,90 @@
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <string>
+
+namespace agent_runtime {
+
+struct SharedBufferRef {
+    std::uint64_t region_id{0};
+    std::uint64_t region_size{0};
+    std::uint64_t offset{0};
+    std::uint64_t length{0};
+    std::uint32_t data_type{0};
+    std::uint32_t flags{0};
+    std::uint64_t version{1};
+};
+
+static_assert(sizeof(SharedBufferRef) == 48);
+
+class SharedMemoryRegion {
+public:
+    SharedMemoryRegion() = default;
+    ~SharedMemoryRegion();
+
+    SharedMemoryRegion(const SharedMemoryRegion &) = delete;
+    SharedMemoryRegion &operator=(const SharedMemoryRegion &) = delete;
+    SharedMemoryRegion(SharedMemoryRegion &&other) noexcept;
+    SharedMemoryRegion &operator=(SharedMemoryRegion &&other) noexcept;
+
+    static SharedMemoryRegion create(std::size_t size,
+                                     std::string *error = nullptr);
+    static SharedMemoryRegion map_existing(int descriptor,
+                                           std::size_t size,
+                                           std::uint64_t region_id,
+                                           std::string *error = nullptr);
+
+    bool valid() const noexcept;
+    void *data() noexcept;
+    const void *data() const noexcept;
+    std::size_t size() const noexcept;
+    int descriptor() const noexcept;
+    std::uint64_t region_id() const noexcept;
+
+private:
+    void reset() noexcept;
+
+    void *address_{nullptr};
+    std::size_t size_{0};
+    int descriptor_{-1};
+    std::uint64_t region_id_{0};
+};
+
+class SharedMemoryChannel {
+public:
+    static bool create_pair(int descriptors[2], std::string *error = nullptr);
+    static bool send(int socket_descriptor,
+                     const SharedBufferRef &reference,
+                     int memory_descriptor,
+                     std::string *error = nullptr);
+    static bool receive(int socket_descriptor,
+                        SharedBufferRef *reference,
+                        int *memory_descriptor,
+                        std::string *error = nullptr);
+    static void close_descriptor(int descriptor) noexcept;
+};
+
+class EventNotifier {
+public:
+    EventNotifier() = default;
+    ~EventNotifier();
+    EventNotifier(const EventNotifier &) = delete;
+    EventNotifier &operator=(const EventNotifier &) = delete;
+    EventNotifier(EventNotifier &&other) noexcept;
+    EventNotifier &operator=(EventNotifier &&other) noexcept;
+
+    static EventNotifier create(std::string *error = nullptr);
+    bool signal(std::uint64_t value = 1, std::string *error = nullptr) const;
+    bool wait(int timeout_ms,
+              std::uint64_t *value = nullptr,
+              std::string *error = nullptr) const;
+    bool valid() const noexcept;
+    int descriptor() const noexcept;
+
+private:
+    explicit EventNotifier(int descriptor) : descriptor_(descriptor) {}
+    int descriptor_{-1};
+};
+
+}  // namespace agent_runtime
