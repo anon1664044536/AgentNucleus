@@ -1,17 +1,39 @@
 #include <chrono>
 #include <cstdlib>
+#include <csignal>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "agent_runtime/resource_monitor.h"
+#include "agent_runtime/control_channel.h"
 #include "agent_runtime/runtime.h"
 
 namespace ar = agent_runtime;
 
 namespace {
+
+volatile std::sig_atomic_t stop_requested = 0;
+
+void handle_signal(int) {
+    stop_requested = 1;
+}
+
+bool parse_size(const std::string &text, std::size_t *value) {
+    try {
+        std::size_t consumed = 0;
+        const unsigned long long parsed = std::stoull(text, &consumed);
+        if (consumed != text.size() || parsed == 0 ||
+            parsed > std::numeric_limits<std::size_t>::max()) return false;
+        *value = static_cast<std::size_t>(parsed);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
 
 int run_demo(bool enable_cgroups) {
     ar::RuntimeConfig config;
@@ -101,6 +123,46 @@ int show_memory() {
     return 0;
 }
 
+int run_server(int argc, char **argv) {
+    stop_requested = 0;
+    ar::RuntimeConfig config;
+    config.worker_count = 2;
+    if (const char *root = std::getenv("AGENT_RUNTIME_CGROUP_ROOT")) {
+        config.cgroup_root = root;
+    }
+    std::string socket_path = ar::default_control_socket_path();
+
+    for (int index = 2; index < argc; ++index) {
+        const std::string option = argv[index];
+        if (option == "--socket" && index + 1 < argc) {
+            socket_path = argv[++index];
+        } else if (option == "--workers" && index + 1 < argc) {
+            if (!parse_size(argv[++index], &config.worker_count)) {
+                std::cerr << "invalid worker count\n";
+                return 2;
+            }
+        } else if (option == "--cgroups") {
+            config.enable_cgroups = true;
+        } else if (option == "--cgroup-root" && index + 1 < argc) {
+            config.cgroup_root = argv[++index];
+        } else {
+            std::cerr << "unknown server option: " << option << '\n';
+            return 2;
+        }
+    }
+
+    ar::AgentDaemon daemon(config, socket_path);
+    std::string error;
+    if (!daemon.start(&error)) {
+        std::cerr << "failed to start agentd: " << error << '\n';
+        return 1;
+    }
+    std::signal(SIGINT, handle_signal);
+    std::signal(SIGTERM, handle_signal);
+    std::cout << "agentd listening on " << daemon.socket_path() << '\n';
+    return daemon.serve([] { return stop_requested != 0; });
+}
+
 }  // namespace
 
 int main(int argc, char **argv) {
@@ -108,6 +170,10 @@ int main(int argc, char **argv) {
     if (command == "--demo") return run_demo(false);
     if (command == "--demo-cgroup") return run_demo(true);
     if (command == "--memory") return show_memory();
-    std::cout << "usage: agentd [--demo|--demo-cgroup|--memory]\n";
+    if (command == "--serve") return run_server(argc, argv);
+    std::cout
+        << "usage: agentd [--demo|--demo-cgroup|--memory]\n"
+        << "       agentd --serve [--socket PATH] [--workers N]\n"
+        << "                      [--cgroups] [--cgroup-root PATH]\n";
     return command == "--help" ? 0 : 2;
 }

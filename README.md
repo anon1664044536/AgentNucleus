@@ -22,6 +22,10 @@ inside openKylin, a Linux virtual machine, WSL2, or a remote Linux machine.
 - `eventfd` notification
 - Optional CPU-only llama.cpp model and context pool
 - Context cancellation, serialization, release, and restoration
+- Persistent `agentd` control service over a versioned Unix Domain Socket
+- Same-UID control authorization and `0600` socket permissions
+- `agentctl` submission, dynamic spawning, inspection, waiting, cancellation,
+  and shutdown commands
 
 ## Directory layout
 
@@ -30,6 +34,8 @@ agent-runtime/
 |- CMakeLists.txt
 |- include/agent_runtime/
 |  |- cgroup_manager.h
+|  |- control_channel.h
+|  |- control_protocol.h
 |  |- model_engine.h
 |  |- process_executor.h
 |  |- resource_monitor.h
@@ -39,6 +45,7 @@ agent-runtime/
 |  `- types.h
 |- src/
 |- apps/agentd.cpp
+|- apps/agentctl.cpp
 |- examples/
 `- tests/
 ```
@@ -68,11 +75,54 @@ ctest --test-dir build --output-on-failure
 Run the basic demonstrations:
 
 ```bash
-./build/agentd --memory
-./build/agentd --demo
-./build/agent_pipeline_demo
-./build/agent_ipc_demo
+./build/debug/agentd --memory
+./build/debug/agentd --demo
+./build/debug/agent_pipeline_demo
+./build/debug/agent_ipc_demo
 ```
+
+## Persistent runtime control plane
+
+Start the runtime in one terminal. The default socket is
+`$XDG_RUNTIME_DIR/agentnucleus.sock`, or `/tmp/agentnucleus-UID.sock` when
+`XDG_RUNTIME_DIR` is unavailable.
+
+```bash
+./build/debug/agentd --serve --workers 4
+```
+
+Submit a command-backed agent and inspect it from another terminal:
+
+```bash
+./build/debug/agentctl ping
+./build/debug/agentctl submit 100 parse-request \
+  --cpu 1 --memory-mib 128 --timeout-ms 5000 -- \
+  /bin/sh -c 'sleep 1'
+./build/debug/agentctl status 100
+./build/debug/agentctl wait 100 10000
+./build/debug/agentctl list
+```
+
+Dynamic children can be added while the daemon is running. Here agent 101 is
+bound to parent 100 and also waits for agent 100 to complete:
+
+```bash
+./build/debug/agentctl spawn 100 101 generate-query \
+  --depends 100 --timeout-ms 5000 -- /bin/sh -c 'exit 0'
+```
+
+Cancellation and graceful daemon shutdown are also exposed through the same
+protocol:
+
+```bash
+./build/debug/agentctl cancel 101
+./build/debug/agentctl shutdown
+```
+
+Use `--socket PATH` on both programs for a custom endpoint. The daemon creates
+the socket with mode `0600`, accepts only clients with the same effective UID,
+limits packets to 1 MiB, and refuses to replace an active socket. This control
+plane is intentionally local to the host; it is not a network API.
 
 ## Build with llama.cpp CPU inference
 
@@ -143,7 +193,7 @@ AGENT_RUNTIME_CGROUP_ROOT=/path/to/delegated/cgroup \
 After delegation is configured, the process/cgroup demonstration is:
 
 ```bash
-./build/agentd --demo-cgroup
+./build/debug/agentd --demo-cgroup
 ```
 
 Each command agent is stopped behind a pipe barrier immediately after `fork`.
@@ -166,7 +216,7 @@ sent between processes.
 ## Current scope
 
 This repository is an executable foundation, not a complete competition
-submission. The next layers should add a persistent external control protocol,
-context ownership/reference counting across process crashes, execution traces,
-context-locality scoring, llama token-generation handlers, and benchmark
-drivers for scheduling and IPC comparisons.
+submission. The next layers should connect command/model results to the shared
+memory data plane, add context ownership/reference counting across process
+crashes, execution traces, context-locality scoring, llama token-generation
+handlers, and benchmark drivers for scheduling and IPC comparisons.

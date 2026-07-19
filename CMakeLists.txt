@@ -36,6 +36,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 add_library(agent_runtime
     src/cgroup_manager.cpp
+    src/control_channel.cpp
+    src/control_protocol.cpp
     src/model_engine.cpp
     src/process_executor.cpp
     src/resource_monitor.cpp
@@ -113,6 +115,9 @@ endif()
 add_executable(agentd apps/agentd.cpp)
 target_link_libraries(agentd PRIVATE agent_runtime::agent_runtime)
 
+add_executable(agentctl apps/agentctl.cpp)
+target_link_libraries(agentctl PRIVATE agent_runtime::agent_runtime)
+
 if(AGENT_RUNTIME_BUILD_EXAMPLES)
     add_executable(agent_pipeline_demo examples/pipeline_demo.cpp)
     target_link_libraries(agent_pipeline_demo PRIVATE agent_runtime::agent_runtime)
@@ -134,9 +139,19 @@ if(BUILD_TESTING AND AGENT_RUNTIME_BUILD_TESTS)
     add_executable(agent_process_test tests/process_test.cpp)
     target_link_libraries(agent_process_test PRIVATE agent_runtime::agent_runtime)
     add_test(NAME process COMMAND agent_process_test)
+
+    add_executable(agent_control_protocol_test tests/control_protocol_test.cpp)
+    target_link_libraries(agent_control_protocol_test PRIVATE
+        agent_runtime::agent_runtime)
+    add_test(NAME control_protocol COMMAND agent_control_protocol_test)
+
+    add_executable(agent_control_plane_test tests/control_plane_test.cpp)
+    target_link_libraries(agent_control_plane_test PRIVATE
+        agent_runtime::agent_runtime)
+    add_test(NAME control_plane COMMAND agent_control_plane_test)
 endif()
 
-install(TARGETS agent_runtime agentd
+install(TARGETS agent_runtime agentd agentctl
     RUNTIME DESTINATION bin
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib)
