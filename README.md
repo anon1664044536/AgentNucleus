@@ -15,6 +15,7 @@ inside openKylin, a Linux virtual machine, WSL2, or a remote Linux machine.
   failure propagation
 - Priority aging and CPU/memory-aware dispatch with concurrent reservations
 - Linux process executor with a pre-exec admission barrier
+- Per-Agent process groups for descendant cancellation and timeout cleanup
 - pidfd-based process observation with waitpid fallback
 - cgroup v2 CPU, memory, and PID limits
 - `/proc/meminfo`, cgroup memory, and PSI resource sampling
@@ -26,6 +27,8 @@ inside openKylin, a Linux virtual machine, WSL2, or a remote Linux machine.
 - Same-UID control authorization and `0600` socket permissions
 - `agentctl` submission, dynamic spawning, inspection, waiting, cancellation,
   and shutdown commands
+- Bounded command `stdout`/`stderr` capture into immutable `memfd` results
+- Zero-copy result retrieval through `SharedBufferRef` and `SCM_RIGHTS`
 
 ## Directory layout
 
@@ -97,10 +100,12 @@ Submit a command-backed agent and inspect it from another terminal:
 ./build/debug/agentctl ping
 ./build/debug/agentctl submit 100 parse-request \
   --cpu 1 --memory-mib 128 --timeout-ms 5000 -- \
-  /bin/sh -c 'sleep 1'
+  /bin/sh -c 'printf "{\"intent\":\"power_query\"}"; sleep 1'
 ./build/debug/agentctl status 100
 ./build/debug/agentctl wait 100 10000
 ./build/debug/agentctl list
+./build/debug/agentctl result 100
+./build/debug/agentctl release-result 100
 ```
 
 Dynamic children can be added while the daemon is running. Here agent 101 is
@@ -123,6 +128,27 @@ Use `--socket PATH` on both programs for a custom endpoint. The daemon creates
 the socket with mode `0600`, accepts only clients with the same effective UID,
 limits packets to 1 MiB, and refuses to replace an active socket. This control
 plane is intentionally local to the host; it is not a network API.
+
+Command output is retained in a sealed shared-memory region owned by the
+runtime. `agentctl result ID` receives a duplicated file descriptor and maps
+the same pages read-only, so the result body is not copied into the control
+packet. Standard output and standard error are merged in write order. The
+default per-Agent limit is 1 MiB and can be changed when starting the daemon:
+
+```bash
+./build/debug/agentd --serve --workers 4 --max-output-mib 8
+```
+
+When output exceeds the configured limit, the runtime continues draining the
+child pipe to avoid deadlock, retains the prefix that fits, and marks the
+`SharedBufferRef` as truncated. Before publication, the backing region is
+shrunk to the retained result length so small outputs do not permanently hold
+the full capture capacity.
+
+In-process tool or model handlers can return an already populated
+`SharedMemoryRegion` through `AgentExecutionResult::output`, together with its
+length, data type, and flags. The runtime applies the same shrinking, sealing,
+ownership, and descriptor-transfer path used for command output.
 
 ## Build with llama.cpp CPU inference
 
@@ -213,10 +239,16 @@ The producer writes into a `memfd` mapping and transfers the descriptor over an
 size, maps the same pages, and reads by offset. Raw virtual addresses are never
 sent between processes.
 
+Completed command results add the immutable and stdout/stderr flags. The
+runtime seals the `memfd` against writes, growth, and shrinking before making
+the descriptor available to consumers. Result storage is reclaimed
+automatically when the runtime exits or when an entry is explicitly erased.
+
 ## Current scope
 
 This repository is an executable foundation, not a complete competition
-submission. The next layers should connect command/model results to the shared
-memory data plane, add context ownership/reference counting across process
-crashes, execution traces, context-locality scoring, llama token-generation
-handlers, and benchmark drivers for scheduling and IPC comparisons.
+submission. The next layers should let dependent command Agents receive input
+descriptors automatically, connect llama token-generation handlers to the same
+result store, add context ownership/reference counting across process crashes,
+execution traces, context-locality scoring, and benchmark drivers for
+scheduling and IPC comparisons.

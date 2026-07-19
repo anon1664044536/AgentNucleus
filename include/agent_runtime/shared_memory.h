@@ -2,7 +2,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
+#include <optional>
 #include <string>
+#include <unordered_map>
+
+#include "agent_runtime/types.h"
 
 namespace agent_runtime {
 
@@ -17,6 +22,19 @@ struct SharedBufferRef {
 };
 
 static_assert(sizeof(SharedBufferRef) == 48);
+
+enum class SharedDataType : std::uint32_t {
+    binary = 0,
+    text_utf8 = 1,
+    json_utf8 = 2,
+};
+
+enum SharedBufferFlags : std::uint32_t {
+    shared_buffer_none = 0,
+    shared_buffer_truncated = 1U << 0U,
+    shared_buffer_immutable = 1U << 1U,
+    shared_buffer_stdout_stderr = 1U << 2U,
+};
 
 class SharedMemoryRegion {
 public:
@@ -34,8 +52,15 @@ public:
                                            std::size_t size,
                                            std::uint64_t region_id,
                                            std::string *error = nullptr);
+    static SharedMemoryRegion map_existing_read_only(
+        int descriptor,
+        std::size_t size,
+        std::uint64_t region_id,
+        std::string *error = nullptr);
 
     bool valid() const noexcept;
+    bool resize(std::size_t size, std::string *error = nullptr);
+    bool seal_read_only(std::string *error = nullptr);
     void *data() noexcept;
     const void *data() const noexcept;
     std::size_t size() const noexcept;
@@ -49,6 +74,53 @@ private:
     std::size_t size_{0};
     int descriptor_{-1};
     std::uint64_t region_id_{0};
+    bool read_only_{false};
+};
+
+class SharedResultHandle {
+public:
+    SharedResultHandle() = default;
+    ~SharedResultHandle();
+    SharedResultHandle(const SharedResultHandle &) = delete;
+    SharedResultHandle &operator=(const SharedResultHandle &) = delete;
+    SharedResultHandle(SharedResultHandle &&other) noexcept;
+    SharedResultHandle &operator=(SharedResultHandle &&other) noexcept;
+
+    bool valid() const noexcept;
+    int descriptor() const noexcept;
+    int release_descriptor() noexcept;
+
+    SharedBufferRef reference;
+
+private:
+    friend class AgentResultStore;
+    explicit SharedResultHandle(SharedBufferRef value, int descriptor);
+    int descriptor_{-1};
+};
+
+class AgentResultStore {
+public:
+    bool publish(AgentId id,
+                 SharedMemoryRegion region,
+                 std::size_t length,
+                 SharedDataType data_type,
+                 std::uint32_t flags,
+                 std::string *error = nullptr);
+    std::optional<SharedResultHandle> acquire(
+        AgentId id,
+        std::string *error = nullptr) const;
+    bool erase(AgentId id);
+    void clear();
+    std::size_t size() const;
+
+private:
+    struct StoredResult {
+        SharedMemoryRegion region;
+        SharedBufferRef reference;
+    };
+
+    mutable std::mutex mutex_;
+    std::unordered_map<AgentId, StoredResult> results_;
 };
 
 class SharedMemoryChannel {

@@ -5,12 +5,13 @@
 #include <string>
 #include <vector>
 
+#include "agent_runtime/shared_memory.h"
 #include "agent_runtime/types.h"
 
 namespace agent_runtime {
 
 constexpr std::uint32_t kControlProtocolMagic = 0x41525443U;
-constexpr std::uint16_t kControlProtocolVersion = 1;
+constexpr std::uint16_t kControlProtocolVersion = 2;
 constexpr std::size_t kMaxControlMessageSize = 1024U * 1024U;
 
 enum class ControlOperation : std::uint16_t {
@@ -21,6 +22,8 @@ enum class ControlOperation : std::uint16_t {
     list = 5,
     cancel = 6,
     shutdown = 7,
+    result = 8,
+    release_result = 9,
 };
 
 struct ControlRequest {
@@ -46,6 +49,8 @@ struct ControlResponse {
     bool success{false};
     std::string message;
     std::vector<ControlAgentInfo> agents;
+    bool result_available{false};
+    SharedBufferRef result;
 };
 
 ControlAgentInfo make_control_info(const AgentSnapshot &snapshot);

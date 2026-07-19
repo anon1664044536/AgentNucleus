@@ -60,6 +60,15 @@ int main() {
                                .process_id = -1,
                                .name = "dynamic child",
                                .kind = "command"});
+    response.result_available = true;
+    response.result = {.region_id = 99,
+                       .region_size = 4096,
+                       .offset = 32,
+                       .length = 128,
+                       .data_type = static_cast<std::uint32_t>(
+                           ar::SharedDataType::text_utf8),
+                       .flags = ar::shared_buffer_immutable,
+                       .version = 1};
     CHECK(ar::encode_control_response(response, &encoded, &error));
     ar::ControlResponse decoded_response;
     CHECK(ar::decode_control_response(
@@ -68,6 +77,10 @@ int main() {
     CHECK(decoded_response.agents.size() == 1);
     CHECK(decoded_response.agents[0].process_id == -1);
     CHECK(decoded_response.agents[0].state == ar::AgentState::running);
+    CHECK(decoded_response.result_available);
+    CHECK(decoded_response.result.region_id == 99);
+    CHECK(decoded_response.result.offset == 32);
+    CHECK(decoded_response.result.length == 128);
 
     encoded[0] = 0;
     CHECK(!ar::decode_control_response(

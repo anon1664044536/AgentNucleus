@@ -145,6 +145,15 @@ int run_server(int argc, char **argv) {
             config.enable_cgroups = true;
         } else if (option == "--cgroup-root" && index + 1 < argc) {
             config.cgroup_root = argv[++index];
+        } else if (option == "--max-output-mib" && index + 1 < argc) {
+            std::size_t mib = 0;
+            if (!parse_size(argv[++index], &mib) ||
+                mib > std::numeric_limits<std::size_t>::max() /
+                          (1024U * 1024U)) {
+                std::cerr << "invalid output limit\n";
+                return 2;
+            }
+            config.max_agent_output_bytes = mib * 1024U * 1024U;
         } else {
             std::cerr << "unknown server option: " << option << '\n';
             return 2;
@@ -174,6 +183,7 @@ int main(int argc, char **argv) {
     std::cout
         << "usage: agentd [--demo|--demo-cgroup|--memory]\n"
         << "       agentd --serve [--socket PATH] [--workers N]\n"
-        << "                      [--cgroups] [--cgroup-root PATH]\n";
+        << "                      [--cgroups] [--cgroup-root PATH]\n"
+        << "                      [--max-output-mib N]\n";
     return command == "--help" ? 0 : 2;
 }

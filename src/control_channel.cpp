@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -46,11 +47,23 @@ bool make_socket_address(const std::string &path,
 
 bool send_packet(int descriptor,
                  const std::vector<std::uint8_t> &packet,
+                 int attached_descriptor,
                  std::string *error) {
-    const ssize_t sent = send(descriptor,
-                              packet.data(),
-                              packet.size(),
-                              MSG_NOSIGNAL);
+    iovec payload{const_cast<std::uint8_t *>(packet.data()), packet.size()};
+    msghdr message{};
+    message.msg_iov = &payload;
+    message.msg_iovlen = 1;
+    alignas(cmsghdr) char control[CMSG_SPACE(sizeof(int))]{};
+    if (attached_descriptor >= 0) {
+        message.msg_control = control;
+        message.msg_controllen = sizeof(control);
+        cmsghdr *header = CMSG_FIRSTHDR(&message);
+        header->cmsg_level = SOL_SOCKET;
+        header->cmsg_type = SCM_RIGHTS;
+        header->cmsg_len = CMSG_LEN(sizeof(int));
+        std::memcpy(CMSG_DATA(header), &attached_descriptor, sizeof(int));
+    }
+    const ssize_t sent = sendmsg(descriptor, &message, MSG_NOSIGNAL);
     if (sent != static_cast<ssize_t>(packet.size())) {
         set_system_error(error, "send");
         return false;
@@ -60,12 +73,17 @@ bool send_packet(int descriptor,
 
 bool receive_packet(int descriptor,
                     std::vector<std::uint8_t> *packet,
+                    int *attached_descriptor,
                     std::string *error) {
+    if (attached_descriptor != nullptr) *attached_descriptor = -1;
     packet->resize(kMaxControlMessageSize);
     iovec buffer{packet->data(), packet->size()};
     msghdr message{};
     message.msg_iov = &buffer;
     message.msg_iovlen = 1;
+    alignas(cmsghdr) char control[CMSG_SPACE(sizeof(int))]{};
+    message.msg_control = control;
+    message.msg_controllen = sizeof(control);
     const ssize_t received = recvmsg(descriptor, &message, MSG_CMSG_CLOEXEC);
     if (received <= 0) {
         if (received == 0) {
@@ -75,8 +93,27 @@ bool receive_packet(int descriptor,
         }
         return false;
     }
+    for (cmsghdr *header = CMSG_FIRSTHDR(&message); header != nullptr;
+         header = CMSG_NXTHDR(&message, header)) {
+        if (header->cmsg_level != SOL_SOCKET ||
+            header->cmsg_type != SCM_RIGHTS ||
+            header->cmsg_len < CMSG_LEN(sizeof(int))) {
+            continue;
+        }
+        int received_descriptor = -1;
+        std::memcpy(&received_descriptor, CMSG_DATA(header), sizeof(int));
+        if (attached_descriptor != nullptr && *attached_descriptor < 0) {
+            *attached_descriptor = received_descriptor;
+        } else {
+            close(received_descriptor);
+        }
+    }
     if ((message.msg_flags & MSG_TRUNC) != 0) {
         set_error(error, "control packet exceeds size limit");
+        return false;
+    }
+    if ((message.msg_flags & MSG_CTRUNC) != 0) {
+        set_error(error, "control descriptor was truncated");
         return false;
     }
     packet->resize(static_cast<std::size_t>(received));
@@ -100,6 +137,16 @@ ControlClient::ControlClient(std::string socket_path)
 bool ControlClient::request(const ControlRequest &request,
                             ControlResponse *response,
                             std::string *error) const {
+    int descriptor = -1;
+    const bool exchanged = exchange(request, response, &descriptor, error);
+    if (descriptor >= 0) close(descriptor);
+    return exchanged;
+}
+
+bool ControlClient::exchange(const ControlRequest &request,
+                             ControlResponse *response,
+                             int *received_descriptor,
+                             std::string *error) const {
     if (response == nullptr) {
         set_error(error, "control response pointer is null");
         return false;
@@ -129,17 +176,69 @@ bool ControlClient::request(const ControlRequest &request,
         close(descriptor);
         return false;
     }
-    if (!send_packet(descriptor, request_packet, error)) {
+    if (!send_packet(descriptor, request_packet, -1, error)) {
         close(descriptor);
         return false;
     }
     std::vector<std::uint8_t> response_packet;
-    const bool received = receive_packet(descriptor, &response_packet, error);
+    const bool received = receive_packet(
+        descriptor, &response_packet, received_descriptor, error);
     close(descriptor);
-    return received && decode_control_response(response_packet.data(),
-                                               response_packet.size(),
-                                               response,
-                                               error);
+    if (!received) {
+        if (received_descriptor != nullptr && *received_descriptor >= 0) {
+            close(*received_descriptor);
+            *received_descriptor = -1;
+        }
+        return false;
+    }
+    if (!decode_control_response(response_packet.data(),
+                                 response_packet.size(),
+                                 response,
+                                 error)) {
+        if (received_descriptor != nullptr && *received_descriptor >= 0) {
+            close(*received_descriptor);
+            *received_descriptor = -1;
+        }
+        return false;
+    }
+    return true;
+}
+
+bool ControlClient::fetch_result(AgentId id,
+                                 ControlResult *result,
+                                 std::string *error) const {
+    if (result == nullptr || id == kInvalidAgentId) {
+        set_error(error, "invalid result request");
+        return false;
+    }
+    ControlRequest request;
+    request.operation = ControlOperation::result;
+    request.target_id = id;
+    ControlResponse response;
+    int descriptor = -1;
+    if (!exchange(request, &response, &descriptor, error)) return false;
+    if (!response.success || !response.result_available || descriptor < 0) {
+        if (descriptor >= 0) close(descriptor);
+        set_error(error,
+                  response.message.empty() ? "agent result is not available"
+                                           : response.message);
+        return false;
+    }
+    if (response.result.region_size >
+        static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+        close(descriptor);
+        set_error(error, "agent result is too large to map");
+        return false;
+    }
+    auto region = SharedMemoryRegion::map_existing_read_only(
+        descriptor,
+        static_cast<std::size_t>(response.result.region_size),
+        response.result.region_id,
+        error);
+    if (!region.valid()) return false;
+    result->reference = response.result;
+    result->region = std::move(region);
+    return true;
 }
 
 AgentDaemon::AgentDaemon(RuntimeConfig runtime_config, std::string socket_path)
@@ -267,13 +366,34 @@ void AgentDaemon::handle_client(int client_descriptor) {
     std::string error;
     ControlResponse response;
     ControlRequest request;
-    if (!receive_packet(client_descriptor, &packet, &error) ||
+    int request_descriptor = -1;
+    if (!receive_packet(client_descriptor, &packet, &request_descriptor, &error) ||
         !decode_control_request(
             packet.data(), packet.size(), &request, &error)) {
         response.message = error.empty() ? "invalid request" : error;
+    } else if (request_descriptor >= 0) {
+        response.message = "control requests must not attach descriptors";
     } else {
-        response = dispatch(request);
+        SharedResultHandle result_handle;
+        response = dispatch(request, &result_handle);
+        std::vector<std::uint8_t> response_packet;
+        if (!encode_control_response(response, &response_packet, &error)) {
+            ControlResponse fallback;
+            fallback.message = error.empty() ? "cannot encode response" : error;
+            response_packet.clear();
+            if (!encode_control_response(fallback, &response_packet, nullptr)) {
+                if (request_descriptor >= 0) close(request_descriptor);
+                return;
+            }
+        }
+        (void) send_packet(client_descriptor,
+                           response_packet,
+                           result_handle.descriptor(),
+                           nullptr);
+        if (request_descriptor >= 0) close(request_descriptor);
+        return;
     }
+    if (request_descriptor >= 0) close(request_descriptor);
 
     std::vector<std::uint8_t> response_packet;
     if (!encode_control_response(response, &response_packet, &error)) {
@@ -282,10 +402,11 @@ void AgentDaemon::handle_client(int client_descriptor) {
         response_packet.clear();
         if (!encode_control_response(fallback, &response_packet, nullptr)) return;
     }
-    (void) send_packet(client_descriptor, response_packet, nullptr);
+    (void) send_packet(client_descriptor, response_packet, -1, nullptr);
 }
 
-ControlResponse AgentDaemon::dispatch(const ControlRequest &request) {
+ControlResponse AgentDaemon::dispatch(const ControlRequest &request,
+                                      SharedResultHandle *result_handle) {
     ControlResponse response;
     std::string error;
     switch (request.operation) {
@@ -326,6 +447,22 @@ ControlResponse AgentDaemon::dispatch(const ControlRequest &request) {
             response.success = true;
             response.message = "agentd is stopping";
             running_.store(false);
+            break;
+        case ControlOperation::result: {
+            auto result = runtime_.result(request.target_id, &error);
+            response.success = result.has_value();
+            if (result.has_value()) {
+                response.result_available = true;
+                response.result = result->reference;
+                *result_handle = std::move(*result);
+            } else {
+                response.message = error;
+            }
+            break;
+        }
+        case ControlOperation::release_result:
+            response.success = runtime_.release_result(request.target_id, &error);
+            response.message = response.success ? "agent result released" : error;
             break;
     }
     return response;

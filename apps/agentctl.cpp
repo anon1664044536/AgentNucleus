@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <cstdint>
@@ -26,6 +27,8 @@ void usage() {
         << "  status ID\n"
         << "  list\n"
         << "  wait ID [TIMEOUT_MS]\n"
+        << "  result ID\n"
+        << "  release-result ID\n"
         << "  cancel ID\n"
         << "  shutdown\n"
         << "task options:\n"
@@ -189,13 +192,21 @@ int main(int argc, char **argv) {
         request.operation = ar::ControlOperation::list;
     } else if (command == "shutdown") {
         request.operation = ar::ControlOperation::shutdown;
-    } else if (command == "status" || command == "cancel" || command == "wait") {
+    } else if (command == "status" || command == "cancel" || command == "wait" ||
+               command == "result" || command == "release-result") {
         if (index >= argc || !parse_unsigned(std::string(argv[index++]), &request.target_id)) {
             std::cerr << "invalid agent id\n";
             return 2;
         }
-        request.operation = command == "cancel" ? ar::ControlOperation::cancel
-                                                  : ar::ControlOperation::status;
+        if (command == "cancel") {
+            request.operation = ar::ControlOperation::cancel;
+        } else if (command == "result") {
+            request.operation = ar::ControlOperation::result;
+        } else if (command == "release-result") {
+            request.operation = ar::ControlOperation::release_result;
+        } else {
+            request.operation = ar::ControlOperation::status;
+        }
     } else if (command == "submit" || command == "spawn") {
         request.operation = command == "spawn" ? ar::ControlOperation::spawn
                                                  : ar::ControlOperation::submit;
@@ -226,6 +237,29 @@ int main(int argc, char **argv) {
     }
 
     ar::ControlClient client(socket_path);
+    if (command == "result") {
+        ar::ControlResult result;
+        std::string error;
+        if (!client.fetch_result(request.target_id, &result, &error)) {
+            std::cerr << "failed to fetch agent result: " << error << '\n';
+            return 1;
+        }
+        const auto *bytes = static_cast<const char *>(result.region.data()) +
+                            static_cast<std::size_t>(result.reference.offset);
+        std::size_t remaining =
+            static_cast<std::size_t>(result.reference.length);
+        while (remaining > 0) {
+            const std::size_t count = std::min<std::size_t>(remaining, 1024U * 1024U);
+            std::cout.write(bytes, static_cast<std::streamsize>(count));
+            if (!std::cout) return 1;
+            bytes += count;
+            remaining -= count;
+        }
+        if (result.truncated()) {
+            std::cerr << "\nwarning: agent output was truncated\n";
+        }
+        return std::cout ? 0 : 1;
+    }
     if (command == "wait") {
         std::uint64_t timeout_ms = 30000;
         if (index < argc && !parse_unsigned(std::string(argv[index]), &timeout_ms)) {

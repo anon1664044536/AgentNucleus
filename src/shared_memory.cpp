@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cerrno>
 #include <cstring>
+#include <fcntl.h>
 #include <limits>
 #include <utility>
 
@@ -52,18 +53,22 @@ SharedMemoryRegion &SharedMemoryRegion::operator=(
     size_ = std::exchange(other.size_, 0);
     descriptor_ = std::exchange(other.descriptor_, -1);
     region_id_ = std::exchange(other.region_id_, 0);
+    read_only_ = std::exchange(other.read_only_, false);
     return *this;
 }
 
 SharedMemoryRegion SharedMemoryRegion::create(std::size_t size,
                                               std::string *error) {
     SharedMemoryRegion region;
-    if (size == 0) {
+    if (size == 0 ||
+        size > static_cast<std::uintmax_t>(
+                   std::numeric_limits<off_t>::max())) {
         if (error != nullptr) *error = "shared memory size must be non-zero";
         return region;
     }
 
-    const int descriptor = memfd_create("agent-runtime", MFD_CLOEXEC);
+    const int descriptor =
+        memfd_create("agent-runtime", MFD_CLOEXEC | MFD_ALLOW_SEALING);
     if (descriptor < 0) {
         set_system_error(error, "memfd_create");
         return region;
@@ -126,8 +131,106 @@ SharedMemoryRegion SharedMemoryRegion::map_existing(int descriptor,
     return region;
 }
 
+SharedMemoryRegion SharedMemoryRegion::map_existing_read_only(
+    int descriptor,
+    std::size_t size,
+    std::uint64_t region_id,
+    std::string *error) {
+    SharedMemoryRegion region;
+    if (descriptor < 0 || size == 0) {
+        if (error != nullptr) *error = "invalid shared memory descriptor";
+        return region;
+    }
+    struct stat descriptor_status {};
+    if (fstat(descriptor, &descriptor_status) != 0 ||
+        descriptor_status.st_size < 0 ||
+        static_cast<std::uint64_t>(descriptor_status.st_size) < size) {
+        if (error != nullptr) *error = "shared memory descriptor is smaller than declared";
+        close(descriptor);
+        return region;
+    }
+    void *address = mmap(nullptr, size, PROT_READ, MAP_SHARED, descriptor, 0);
+    if (address == MAP_FAILED) {
+        set_system_error(error, "mmap read-only");
+        close(descriptor);
+        return region;
+    }
+    region.address_ = address;
+    region.size_ = size;
+    region.descriptor_ = descriptor;
+    region.region_id_ = region_id;
+    region.read_only_ = true;
+    return region;
+}
+
 bool SharedMemoryRegion::valid() const noexcept {
     return address_ != nullptr && size_ > 0;
+}
+
+bool SharedMemoryRegion::resize(std::size_t size, std::string *error) {
+    if (!valid() || read_only_ || size == 0 ||
+        size > static_cast<std::uintmax_t>(
+                   std::numeric_limits<off_t>::max())) {
+        if (error != nullptr) *error = "invalid shared memory resize";
+        return false;
+    }
+    if (size == size_) return true;
+    const std::size_t previous_size = size_;
+    if (munmap(address_, size_) != 0) {
+        set_system_error(error, "munmap before resize");
+        return false;
+    }
+    address_ = nullptr;
+    if (ftruncate(descriptor_, static_cast<off_t>(size)) != 0) {
+        address_ = mmap(nullptr,
+                        previous_size,
+                        PROT_READ | PROT_WRITE,
+                        MAP_SHARED,
+                        descriptor_,
+                        0);
+        if (address_ == MAP_FAILED) address_ = nullptr;
+        set_system_error(error, "resize shared memory");
+        return false;
+    }
+    size_ = size;
+    address_ = mmap(nullptr,
+                    size_,
+                    PROT_READ | PROT_WRITE,
+                    MAP_SHARED,
+                    descriptor_,
+                    0);
+    if (address_ == MAP_FAILED) {
+        address_ = nullptr;
+        set_system_error(error, "remap resized shared memory");
+        return false;
+    }
+    return true;
+}
+
+bool SharedMemoryRegion::seal_read_only(std::string *error) {
+    if (!valid() || read_only_) {
+        if (error != nullptr) *error = "shared memory region is not writable";
+        return false;
+    }
+    if (munmap(address_, size_) != 0) {
+        set_system_error(error, "munmap before sealing");
+        return false;
+    }
+    address_ = nullptr;
+    constexpr int seals =
+        F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
+    if (fcntl(descriptor_, F_ADD_SEALS, seals) != 0) {
+        set_system_error(error, "seal shared memory");
+        return false;
+    }
+    address_ = mmap(nullptr, size_, PROT_READ, MAP_SHARED, descriptor_, 0);
+    if (address_ == MAP_FAILED) {
+        address_ = nullptr;
+        set_system_error(error, "remap sealed shared memory");
+        return false;
+    }
+    read_only_ = true;
+    return true;
 }
 
 void *SharedMemoryRegion::data() noexcept {
@@ -161,6 +264,102 @@ void SharedMemoryRegion::reset() noexcept {
     size_ = 0;
     descriptor_ = -1;
     region_id_ = 0;
+    read_only_ = false;
+}
+
+SharedResultHandle::SharedResultHandle(SharedBufferRef value, int descriptor)
+    : reference(value), descriptor_(descriptor) {}
+
+SharedResultHandle::~SharedResultHandle() {
+    if (descriptor_ >= 0) close(descriptor_);
+}
+
+SharedResultHandle::SharedResultHandle(SharedResultHandle &&other) noexcept
+    : reference(other.reference),
+      descriptor_(std::exchange(other.descriptor_, -1)) {}
+
+SharedResultHandle &SharedResultHandle::operator=(
+    SharedResultHandle &&other) noexcept {
+    if (this != &other) {
+        if (descriptor_ >= 0) close(descriptor_);
+        reference = other.reference;
+        descriptor_ = std::exchange(other.descriptor_, -1);
+    }
+    return *this;
+}
+
+bool SharedResultHandle::valid() const noexcept {
+    return descriptor_ >= 0 && reference.region_id != 0;
+}
+
+int SharedResultHandle::descriptor() const noexcept {
+    return descriptor_;
+}
+
+int SharedResultHandle::release_descriptor() noexcept {
+    return std::exchange(descriptor_, -1);
+}
+
+bool AgentResultStore::publish(AgentId id,
+                               SharedMemoryRegion region,
+                               std::size_t length,
+                               SharedDataType data_type,
+                               std::uint32_t flags,
+                               std::string *error) {
+    if (id == kInvalidAgentId || !region.valid() || length > region.size()) {
+        if (error != nullptr) *error = "invalid agent result";
+        return false;
+    }
+    const std::size_t retained_size = length == 0 ? 1 : length;
+    if (retained_size != region.size() &&
+        !region.resize(retained_size, error)) {
+        return false;
+    }
+    if (!region.seal_read_only(error)) return false;
+    SharedBufferRef reference{.region_id = region.region_id(),
+                              .region_size = region.size(),
+                              .offset = 0,
+                              .length = length,
+                              .data_type = static_cast<std::uint32_t>(data_type),
+                              .flags = flags | shared_buffer_immutable,
+                              .version = 1};
+    std::lock_guard lock(mutex_);
+    results_.insert_or_assign(
+        id, StoredResult{.region = std::move(region), .reference = reference});
+    return true;
+}
+
+std::optional<SharedResultHandle> AgentResultStore::acquire(
+    AgentId id,
+    std::string *error) const {
+    std::lock_guard lock(mutex_);
+    const auto found = results_.find(id);
+    if (found == results_.end()) {
+        if (error != nullptr) *error = "agent result is not available";
+        return std::nullopt;
+    }
+    const int descriptor =
+        fcntl(found->second.region.descriptor(), F_DUPFD_CLOEXEC, 0);
+    if (descriptor < 0) {
+        set_system_error(error, "duplicate result descriptor");
+        return std::nullopt;
+    }
+    return SharedResultHandle(found->second.reference, descriptor);
+}
+
+bool AgentResultStore::erase(AgentId id) {
+    std::lock_guard lock(mutex_);
+    return results_.erase(id) != 0;
+}
+
+void AgentResultStore::clear() {
+    std::lock_guard lock(mutex_);
+    results_.clear();
+}
+
+std::size_t AgentResultStore::size() const {
+    std::lock_guard lock(mutex_);
+    return results_.size();
 }
 
 bool SharedMemoryChannel::create_pair(int descriptors[2], std::string *error) {

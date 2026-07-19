@@ -80,7 +80,8 @@ int main() {
     submit.task.id = 100;
     submit.task.name = "root";
     submit.task.kind = "command";
-    submit.task.command = {"/bin/sh", "-c", "sleep 0.2"};
+    submit.task.command = {
+        "/bin/sh", "-c", "printf 'root-output'; sleep 0.2"};
     submit.task.resources.timeout = std::chrono::seconds(2);
     passed = exchange(client, submit, &response) && passed;
 
@@ -98,6 +99,30 @@ int main() {
                             ar::AgentState::completed,
                             std::chrono::seconds(3)) &&
              passed;
+
+    ar::ControlResult root_result;
+    passed = client.fetch_result(100, &root_result, &error) && passed;
+    if (root_result.region.valid()) {
+        const std::string result_text(
+            static_cast<const char *>(root_result.region.data()) +
+                root_result.reference.offset,
+            root_result.reference.length);
+        passed = result_text == "root-output" && !root_result.truncated() && passed;
+    } else {
+        passed = false;
+    }
+    ar::ControlRequest release_result;
+    release_result.operation = ar::ControlOperation::release_result;
+    release_result.target_id = 100;
+    passed = exchange(client, release_result, &response) && passed;
+    ar::ControlResult released_result;
+    passed = !client.fetch_result(100, &released_result, &error) && passed;
+    if (root_result.region.valid()) {
+        const std::string retained_after_release(
+            static_cast<const char *>(root_result.region.data()),
+            root_result.reference.length);
+        passed = retained_after_release == "root-output" && passed;
+    }
 
     ar::ControlRequest list;
     list.operation = ar::ControlOperation::list;

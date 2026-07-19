@@ -11,6 +11,15 @@ namespace agent_runtime {
 
 std::string default_control_socket_path();
 
+struct ControlResult {
+    SharedBufferRef reference;
+    SharedMemoryRegion region;
+
+    bool truncated() const noexcept {
+        return (reference.flags & shared_buffer_truncated) != 0;
+    }
+};
+
 class ControlClient {
 public:
     explicit ControlClient(std::string socket_path = default_control_socket_path());
@@ -18,8 +27,15 @@ public:
     bool request(const ControlRequest &request,
                  ControlResponse *response,
                  std::string *error = nullptr) const;
+    bool fetch_result(AgentId id,
+                      ControlResult *result,
+                      std::string *error = nullptr) const;
 
 private:
+    bool exchange(const ControlRequest &request,
+                  ControlResponse *response,
+                  int *received_descriptor,
+                  std::string *error) const;
     std::string socket_path_;
 };
 
@@ -40,7 +56,8 @@ public:
 private:
     bool open_socket(std::string *error);
     void handle_client(int client_descriptor);
-    ControlResponse dispatch(const ControlRequest &request);
+    ControlResponse dispatch(const ControlRequest &request,
+                             SharedResultHandle *result_handle);
 
     AgentRuntime runtime_;
     std::string socket_path_;

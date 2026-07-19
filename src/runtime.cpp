@@ -98,12 +98,26 @@ bool AgentRuntime::cancel(AgentId id, std::string *error) {
 bool AgentRuntime::wait_until_idle(std::chrono::milliseconds timeout) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     do {
-        if (scheduler_.all_terminal()) {
+        if (scheduler_.all_terminal() && active_executions_.load() == 0) {
             return true;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     } while (std::chrono::steady_clock::now() < deadline);
-    return scheduler_.all_terminal();
+    return scheduler_.all_terminal() && active_executions_.load() == 0;
+}
+
+std::optional<SharedResultHandle> AgentRuntime::result(
+    AgentId id,
+    std::string *error) const {
+    return result_store_.acquire(id, error);
+}
+
+bool AgentRuntime::release_result(AgentId id, std::string *error) {
+    if (!result_store_.erase(id)) {
+        if (error != nullptr) *error = "agent result is not available";
+        return false;
+    }
+    return true;
 }
 
 AgentScheduler &AgentRuntime::scheduler() noexcept {
@@ -136,6 +150,7 @@ void AgentRuntime::worker_loop() {
             continue;
         }
 
+        active_executions_.fetch_add(1);
         const AgentExecutionResult result = execute(*task);
         std::string ignored;
         if (result.success) {
@@ -143,11 +158,20 @@ void AgentRuntime::worker_loop() {
         } else {
             scheduler_.fail(*id, result.message, &ignored);
         }
+        active_executions_.fetch_sub(1);
     }
 }
 
 AgentExecutionResult AgentRuntime::execute(const AgentSnapshot &snapshot) {
+    (void) result_store_.erase(snapshot.spec.id);
     if (!snapshot.spec.command.empty()) {
+        SharedMemoryRegion output_region;
+        if (config_.max_agent_output_bytes > 0) {
+            std::string output_error;
+            output_region = SharedMemoryRegion::create(
+                config_.max_agent_output_bytes, &output_error);
+            if (!output_region.valid()) return {false, output_error};
+        }
         auto cancel_token = std::make_shared<std::atomic_bool>(
             cancel_requested_.load());
         {
@@ -195,13 +219,28 @@ AgentExecutionResult AgentRuntime::execute(const AgentSnapshot &snapshot) {
                     return false;
                 }
                 return true;
-            });
+            },
+            output_region.valid() ? output_region.data() : nullptr,
+            output_region.size());
         if (cgroup_created) {
             std::string ignored;
             (void) cgroup_manager_.kill_all(snapshot.spec.id, &ignored);
             (void) cgroup_manager_.remove_agent_group(snapshot.spec.id, &ignored);
         }
         remove_cancel_token();
+        if (result.started && output_region.valid()) {
+            std::uint32_t flags = shared_buffer_stdout_stderr;
+            if (result.output_truncated) flags |= shared_buffer_truncated;
+            std::string output_error;
+            if (!result_store_.publish(snapshot.spec.id,
+                                       std::move(output_region),
+                                       result.output_bytes,
+                                       SharedDataType::text_utf8,
+                                       flags,
+                                       &output_error)) {
+                return {false, output_error};
+            }
+        }
         if (!result.started) {
             return {false, result.error};
         }
@@ -230,7 +269,31 @@ AgentExecutionResult AgentRuntime::execute(const AgentSnapshot &snapshot) {
         return {false, ignored};
     }
     try {
-        return handler(snapshot);
+        AgentExecutionResult result = handler(snapshot);
+        if (result.output.valid()) {
+            if (result.output_length > result.output.size()) {
+                return {false, "agent handler output exceeds its shared region"};
+            }
+            std::size_t output_length = result.output_length;
+            std::uint32_t output_flags = result.output_flags;
+            if (config_.max_agent_output_bytes > 0 &&
+                output_length > config_.max_agent_output_bytes) {
+                output_length = config_.max_agent_output_bytes;
+                output_flags |= shared_buffer_truncated;
+            }
+            std::string output_error;
+            if (!result_store_.publish(snapshot.spec.id,
+                                       std::move(result.output),
+                                       output_length,
+                                       result.output_type,
+                                       output_flags,
+                                       &output_error)) {
+                return {false, output_error};
+            }
+        } else if (result.output_length != 0) {
+            return {false, "agent handler returned output without a region"};
+        }
+        return result;
     } catch (const std::exception &exception) {
         return {false, exception.what()};
     } catch (...) {

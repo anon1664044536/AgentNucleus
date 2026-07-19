@@ -137,7 +137,8 @@ bool decode_header(Reader *reader,
         return false;
     }
     if (operation_value < static_cast<std::uint16_t>(ControlOperation::ping) ||
-        operation_value > static_cast<std::uint16_t>(ControlOperation::shutdown)) {
+        operation_value >
+            static_cast<std::uint16_t>(ControlOperation::release_result)) {
         if (error != nullptr) *error = "unknown control operation";
         return false;
     }
@@ -240,6 +241,29 @@ bool decode_agent(Reader *reader, ControlAgentInfo *agent) {
     return true;
 }
 
+void encode_reference(const SharedBufferRef &reference, Writer *writer) {
+    writer->u64(reference.region_id);
+    writer->u64(reference.region_size);
+    writer->u64(reference.offset);
+    writer->u64(reference.length);
+    writer->u32(reference.data_type);
+    writer->u32(reference.flags);
+    writer->u64(reference.version);
+}
+
+bool decode_reference(Reader *reader, SharedBufferRef *reference) {
+    return reader->u64(&reference->region_id) &&
+           reader->u64(&reference->region_size) &&
+           reader->u64(&reference->offset) &&
+           reader->u64(&reference->length) &&
+           reader->u32(&reference->data_type) &&
+           reader->u32(&reference->flags) &&
+           reader->u64(&reference->version) && reference->version == 1 &&
+           reference->region_id != 0 && reference->region_size != 0 &&
+           reference->offset <= reference->region_size &&
+           reference->length <= reference->region_size - reference->offset;
+}
+
 }  // namespace
 
 ControlAgentInfo make_control_info(const AgentSnapshot &snapshot) {
@@ -308,6 +332,8 @@ bool encode_control_response(const ControlResponse &response,
     for (const auto &agent : response.agents) {
         if (!encode_agent(agent, &writer, error)) return false;
     }
+    writer.u8(response.result_available ? 1 : 0);
+    if (response.result_available) encode_reference(response.result, &writer);
     return finish_message(output, error);
 }
 
@@ -339,6 +365,18 @@ bool decode_control_response(const std::uint8_t *data,
             if (error != nullptr) *error = "invalid agent response";
             return false;
         }
+    }
+    std::uint8_t result_available = 0;
+    if (!reader.u8(&result_available) || result_available > 1) {
+        if (error != nullptr) *error = "invalid result response";
+        return false;
+    }
+    response->result_available = result_available == 1;
+    response->result = {};
+    if (response->result_available &&
+        !decode_reference(&reader, &response->result)) {
+        if (error != nullptr) *error = "invalid shared result reference";
+        return false;
     }
     if (reader.remaining() != 0) {
         if (error != nullptr) *error = "trailing control response data";
