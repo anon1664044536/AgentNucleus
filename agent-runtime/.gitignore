@@ -5,7 +5,3 @@
 *.log
 *.gguf
 /models/
-
-# Ignore external repositories and tools
-/llama.cpp/
-/.agents/

@@ -1,0 +1,7 @@
+/build*/
+/compile_commands.json
+/tests/build/
+/tests/test_multi_agent
+*.o
+*.gguf
+*.log

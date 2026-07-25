@@ -1,0 +1,62 @@
+{
+  "version": 2,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 20,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "openkylin-debug",
+      "displayName": "openKylin Debug (simulated model)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "AGENT_RUNTIME_TOP_WITH_LLAMA": "OFF",
+        "AGENT_RUNTIME_TOP_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "openkylin-llama-cpu",
+      "displayName": "openKylin llama.cpp CPU Release",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/llama-cpu",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "AGENT_RUNTIME_TOP_WITH_LLAMA": "ON",
+        "AGENT_RUNTIME_TOP_BUILD_TESTS": "ON",
+        "AGENT_RUNTIME_TOP_LLAMA_SOURCE_DIR": "${sourceDir}/../llama.cpp",
+        "GGML_CUDA": "OFF",
+        "GGML_NATIVE": "ON",
+        "LLAMA_CURL": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "openkylin-debug",
+      "configurePreset": "openkylin-debug"
+    },
+    {
+      "name": "openkylin-llama-cpu",
+      "configurePreset": "openkylin-llama-cpu"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "openkylin-debug",
+      "configurePreset": "openkylin-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "openkylin-llama-cpu",
+      "configurePreset": "openkylin-llama-cpu",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}
