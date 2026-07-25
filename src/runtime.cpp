@@ -164,6 +164,9 @@ void AgentRuntime::worker_loop() {
 
 AgentExecutionResult AgentRuntime::execute(const AgentSnapshot &snapshot) {
     (void) result_store_.erase(snapshot.spec.id);
+    if (snapshot.spec.invocation.has_value()) {
+        return execute_invocation(snapshot);
+    }
     if (!snapshot.spec.command.empty()) {
         SharedMemoryRegion output_region;
         if (config_.max_agent_output_bytes > 0) {
@@ -299,6 +302,132 @@ AgentExecutionResult AgentRuntime::execute(const AgentSnapshot &snapshot) {
     } catch (...) {
         return {false, "agent handler raised an unknown exception"};
     }
+}
+
+AgentExecutionResult AgentRuntime::execute_invocation(
+    const AgentSnapshot &snapshot) {
+    if (config_.invocation_socket.empty()) {
+        return {false, "no model/tool invocation backend is configured"};
+    }
+    std::string state_error;
+    if (!scheduler_.mark_running(snapshot.spec.id, -1, &state_error)) {
+        return {false, state_error};
+    }
+
+    auto cancel_token = std::make_shared<std::atomic_bool>(
+        cancel_requested_.load());
+    {
+        std::lock_guard lock(cancel_mutex_);
+        cancel_tokens_[snapshot.spec.id] = cancel_token;
+    }
+    const auto remove_cancel_token = [&] {
+        std::lock_guard lock(cancel_mutex_);
+        cancel_tokens_.erase(snapshot.spec.id);
+    };
+
+    std::vector<SharedResultHandle> input_handles;
+    std::vector<AgentId> input_producers;
+    input_handles.reserve(snapshot.spec.dependencies.size());
+    input_producers.reserve(snapshot.spec.dependencies.size());
+    for (const AgentId dependency : snapshot.spec.dependencies) {
+        auto input = result_store_.acquire(dependency);
+        if (input.has_value()) {
+            input_handles.push_back(std::move(*input));
+            input_producers.push_back(dependency);
+        }
+    }
+    if (input_handles.size() > kMaxInvocationInputs) {
+        remove_cancel_token();
+        return {false, "invocation has too many dependency results"};
+    }
+
+    const InvocationSpec &spec = *snapshot.spec.invocation;
+    InvocationRequest request;
+    request.agent_id = snapshot.spec.id;
+    request.parent_id = snapshot.spec.parent_id;
+    request.kind = spec.kind;
+    request.target = spec.target;
+    request.operation = spec.operation;
+    request.payload = spec.payload;
+    request.context_id = spec.context_id;
+    request.priority = snapshot.spec.priority;
+    request.resources = snapshot.spec.resources;
+
+    std::vector<InvocationAttachment> attachments;
+    attachments.reserve(input_handles.size());
+    for (std::size_t index = 0; index < input_handles.size(); ++index) {
+        const SharedResultHandle &input = input_handles[index];
+        const AgentId producer = input_producers[index];
+        request.inputs.push_back(
+            {.producer_id = producer, .reference = input.reference});
+        attachments.push_back({.producer_id = producer,
+                               .reference = input.reference,
+                               .descriptor = input.descriptor()});
+    }
+
+    InvocationClient client(config_.invocation_socket);
+    InvocationCallResult call_result;
+    std::string invocation_error;
+    const bool invoked = client.invoke(request,
+                                       attachments,
+                                       &call_result,
+                                       snapshot.spec.resources.timeout,
+                                       cancel_token.get(),
+                                       &invocation_error);
+    remove_cancel_token();
+    if (!invoked) {
+        return {false, invocation_error};
+    }
+
+    std::string ignored;
+    (void) scheduler_.record_metrics(
+        snapshot.spec.id, call_result.response.metrics, &ignored);
+    if (call_result.response.status != InvocationStatus::ok) {
+        return {false,
+                call_result.response.message.empty()
+                    ? "model/tool invocation failed"
+                    : call_result.response.message};
+    }
+    if (call_result.response.process_id >= 0) {
+        (void) scheduler_.bind_process(snapshot.spec.id,
+                                      call_result.response.process_id,
+                                      &ignored);
+    }
+    if (call_result.response.context_id != kInvalidContextId) {
+        (void) scheduler_.bind_context(snapshot.spec.id,
+                                      call_result.response.context_id,
+                                      &ignored);
+    }
+    if (call_result.response.output_available &&
+        call_result.response.output.offset != 0) {
+        return {false, "invocation backend returned a non-zero output offset"};
+    }
+
+    if (call_result.response.output_available) {
+        std::size_t output_length = static_cast<std::size_t>(
+            call_result.response.output.length);
+        const auto output_type = static_cast<SharedDataType>(
+            call_result.response.output.data_type);
+        std::uint32_t output_flags =
+            call_result.response.output.flags & ~shared_buffer_immutable;
+        if (config_.max_agent_output_bytes > 0 &&
+            output_length > config_.max_agent_output_bytes) {
+            output_length = config_.max_agent_output_bytes;
+            output_flags |= shared_buffer_truncated;
+        }
+        std::string output_error;
+        if (!result_store_.publish(snapshot.spec.id,
+                                   std::move(call_result.output),
+                                   output_length,
+                                   output_type,
+                                   output_flags,
+                                   &output_error)) {
+            return {false, output_error};
+        }
+    }
+    AgentExecutionResult result;
+    result.message = std::move(call_result.response.message);
+    return result;
 }
 
 }  // namespace agent_runtime

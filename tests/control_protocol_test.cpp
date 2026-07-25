@@ -51,6 +51,25 @@ int main() {
     CHECK(decoded.task.resources.timeout == source.task.resources.timeout);
     CHECK(decoded.task.retry_limit == source.task.retry_limit);
 
+    source.task.command.clear();
+    source.task.kind = "invocation";
+    source.task.invocation = ar::InvocationSpec{
+        .kind = ar::InvocationKind::model,
+        .target = "qwen2",
+        .operation = "generate",
+        .payload = R"({"prompt":"hello"})",
+        .context_id = 77};
+    CHECK(ar::encode_control_request(source, &encoded, &error));
+    CHECK(ar::decode_control_request(
+        encoded.data(), encoded.size(), &decoded, &error));
+    CHECK(decoded.task.command.empty());
+    CHECK(decoded.task.invocation.has_value());
+    CHECK(decoded.task.invocation->kind == ar::InvocationKind::model);
+    CHECK(decoded.task.invocation->target == "qwen2");
+    CHECK(decoded.task.invocation->operation == "generate");
+    CHECK(decoded.task.invocation->payload == R"({"prompt":"hello"})");
+    CHECK(decoded.task.invocation->context_id == 77);
+
     ar::ControlResponse response;
     response.success = true;
     response.message = "ok";
@@ -58,6 +77,13 @@ int main() {
                                .parent_id = 41,
                                .state = ar::AgentState::running,
                                .process_id = -1,
+                               .context_id = 77,
+                               .metrics = {.execution_time_us = 900,
+                                           .input_tokens = 12,
+                                           .output_tokens = 4,
+                                           .reused_tokens = 8,
+                                           .cache_bytes = 4096,
+                                           .cache_hit = true},
                                .name = "dynamic child",
                                .kind = "command"});
     response.result_available = true;
@@ -77,6 +103,9 @@ int main() {
     CHECK(decoded_response.agents.size() == 1);
     CHECK(decoded_response.agents[0].process_id == -1);
     CHECK(decoded_response.agents[0].state == ar::AgentState::running);
+    CHECK(decoded_response.agents[0].context_id == 77);
+    CHECK(decoded_response.agents[0].metrics.cache_hit);
+    CHECK(decoded_response.agents[0].metrics.reused_tokens == 8);
     CHECK(decoded_response.result_available);
     CHECK(decoded_response.result.region_id == 99);
     CHECK(decoded_response.result.offset == 32);

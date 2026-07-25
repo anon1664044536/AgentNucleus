@@ -39,6 +39,12 @@ public:
     bool bind_context(AgentId id,
                       ContextId context_id,
                       std::string *error = nullptr);
+    bool bind_process(AgentId id,
+                      std::int64_t process_id,
+                      std::string *error = nullptr);
+    bool record_metrics(AgentId id,
+                        const AgentPerformanceMetrics &metrics,
+                        std::string *error = nullptr);
 
     std::optional<AgentSnapshot> snapshot(AgentId id) const;
     std::vector<AgentSnapshot> snapshots() const;

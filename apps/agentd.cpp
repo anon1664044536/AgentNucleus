@@ -42,6 +42,9 @@ int run_demo(bool enable_cgroups) {
     if (const char *root = std::getenv("AGENT_RUNTIME_CGROUP_ROOT")) {
         config.cgroup_root = root;
     }
+    if (const char *top_socket = std::getenv("AGENT_RUNTIME_TOP_SOCKET")) {
+        config.invocation_socket = top_socket;
+    }
     ar::AgentRuntime runtime(config);
 
     runtime.register_handler("demo", [](const ar::AgentSnapshot &agent) {
@@ -154,6 +157,8 @@ int run_server(int argc, char **argv) {
                 return 2;
             }
             config.max_agent_output_bytes = mib * 1024U * 1024U;
+        } else if (option == "--top-socket" && index + 1 < argc) {
+            config.invocation_socket = argv[++index];
         } else {
             std::cerr << "unknown server option: " << option << '\n';
             return 2;
@@ -184,6 +189,7 @@ int main(int argc, char **argv) {
         << "usage: agentd [--demo|--demo-cgroup|--memory]\n"
         << "       agentd --serve [--socket PATH] [--workers N]\n"
         << "                      [--cgroups] [--cgroup-root PATH]\n"
-        << "                      [--max-output-mib N]\n";
+        << "                      [--max-output-mib N]\n"
+        << "                      [--top-socket PATH]\n";
     return command == "--help" ? 0 : 2;
 }

@@ -3,6 +3,7 @@
 #include <bit>
 #include <limits>
 #include <type_traits>
+#include <utility>
 
 namespace agent_runtime {
 namespace {
@@ -149,8 +150,14 @@ bool decode_header(Reader *reader,
 bool encode_task(const AgentTaskSpec &task, Writer *writer, std::string *error) {
     if (task.priority < std::numeric_limits<std::int32_t>::min() ||
         task.priority > std::numeric_limits<std::int32_t>::max() ||
-        task.resources.timeout.count() < 0) {
-        if (error != nullptr) *error = "task contains an invalid numeric value";
+        task.resources.timeout.count() < 0 ||
+        (!task.command.empty() && task.invocation.has_value()) ||
+        (task.invocation.has_value() &&
+         (task.invocation->target.empty() ||
+          task.invocation->operation.empty() ||
+          (task.invocation->kind != InvocationKind::model &&
+           task.invocation->kind != InvocationKind::tool)))) {
+        if (error != nullptr) *error = "task contains invalid fields";
         return false;
     }
     writer->u64(task.id);
@@ -174,6 +181,16 @@ bool encode_task(const AgentTaskSpec &task, Writer *writer, std::string *error) 
     writer->u32(static_cast<std::uint32_t>(task.command.size()));
     for (const auto &argument : task.command) {
         if (!writer->string(argument, error)) return false;
+    }
+    writer->u8(task.invocation.has_value() ? 1 : 0);
+    if (task.invocation.has_value()) {
+        writer->u8(static_cast<std::uint8_t>(task.invocation->kind));
+        writer->u64(task.invocation->context_id);
+        if (!writer->string(task.invocation->target, error) ||
+            !writer->string(task.invocation->operation, error) ||
+            !writer->string(task.invocation->payload, error)) {
+            return false;
+        }
     }
     return true;
 }
@@ -207,6 +224,25 @@ bool decode_task(Reader *reader, AgentTaskSpec *task) {
     for (auto &argument : task->command) {
         if (!reader->string(&argument)) return false;
     }
+    std::uint8_t has_invocation = 0;
+    if (!reader->u8(&has_invocation) || has_invocation > 1) return false;
+    task->invocation.reset();
+    if (has_invocation == 1) {
+        std::uint8_t kind = 0;
+        InvocationSpec invocation;
+        if (!reader->u8(&kind) ||
+            kind < static_cast<std::uint8_t>(InvocationKind::model) ||
+            kind > static_cast<std::uint8_t>(InvocationKind::tool) ||
+            !reader->u64(&invocation.context_id) ||
+            !reader->string(&invocation.target) ||
+            !reader->string(&invocation.operation) ||
+            !reader->string(&invocation.payload) ||
+            invocation.target.empty() || invocation.operation.empty()) {
+            return false;
+        }
+        invocation.kind = static_cast<InvocationKind>(kind);
+        task->invocation = std::move(invocation);
+    }
     return true;
 }
 
@@ -220,17 +256,32 @@ bool encode_agent(const ControlAgentInfo &agent,
     writer->u32(agent.unresolved_dependencies);
     writer->u32(agent.retry_count);
     writer->u64(agent.context_id);
+    writer->u64(agent.metrics.queue_time_us);
+    writer->u64(agent.metrics.execution_time_us);
+    writer->u64(agent.metrics.input_tokens);
+    writer->u64(agent.metrics.output_tokens);
+    writer->u64(agent.metrics.reused_tokens);
+    writer->u64(agent.metrics.cache_bytes);
+    writer->u8(agent.metrics.cache_hit ? 1 : 0);
     return writer->string(agent.name, error) && writer->string(agent.kind, error) &&
            writer->string(agent.error, error);
 }
 
 bool decode_agent(Reader *reader, ControlAgentInfo *agent) {
     std::uint8_t state = 0;
+    std::uint8_t cache_hit = 0;
     std::uint64_t process_id = 0;
     if (!reader->u64(&agent->id) || !reader->u64(&agent->parent_id) ||
         !reader->u8(&state) || !reader->u64(&process_id) ||
         !reader->u32(&agent->unresolved_dependencies) ||
         !reader->u32(&agent->retry_count) || !reader->u64(&agent->context_id) ||
+        !reader->u64(&agent->metrics.queue_time_us) ||
+        !reader->u64(&agent->metrics.execution_time_us) ||
+        !reader->u64(&agent->metrics.input_tokens) ||
+        !reader->u64(&agent->metrics.output_tokens) ||
+        !reader->u64(&agent->metrics.reused_tokens) ||
+        !reader->u64(&agent->metrics.cache_bytes) ||
+        !reader->u8(&cache_hit) || cache_hit > 1 ||
         !reader->string(&agent->name) || !reader->string(&agent->kind) ||
         !reader->string(&agent->error)) {
         return false;
@@ -238,6 +289,7 @@ bool decode_agent(Reader *reader, ControlAgentInfo *agent) {
     if (state > static_cast<std::uint8_t>(AgentState::cancelled)) return false;
     agent->state = static_cast<AgentState>(state);
     agent->process_id = std::bit_cast<std::int64_t>(process_id);
+    agent->metrics.cache_hit = cache_hit == 1;
     return true;
 }
 
@@ -274,6 +326,7 @@ ControlAgentInfo make_control_info(const AgentSnapshot &snapshot) {
             .unresolved_dependencies = snapshot.unresolved_dependencies,
             .retry_count = snapshot.retry_count,
             .context_id = snapshot.context_id,
+            .metrics = snapshot.metrics,
             .name = snapshot.spec.name,
             .kind = snapshot.spec.kind,
             .error = snapshot.error};

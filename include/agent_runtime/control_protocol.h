@@ -11,7 +11,7 @@
 namespace agent_runtime {
 
 constexpr std::uint32_t kControlProtocolMagic = 0x41525443U;
-constexpr std::uint16_t kControlProtocolVersion = 2;
+constexpr std::uint16_t kControlProtocolVersion = 3;
 constexpr std::size_t kMaxControlMessageSize = 1024U * 1024U;
 
 enum class ControlOperation : std::uint16_t {
@@ -40,6 +40,7 @@ struct ControlAgentInfo {
     std::uint32_t unresolved_dependencies{0};
     std::uint32_t retry_count{0};
     ContextId context_id{kInvalidContextId};
+    AgentPerformanceMetrics metrics;
     std::string name;
     std::string kind;
     std::string error;

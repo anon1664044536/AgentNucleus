@@ -28,6 +28,14 @@ bool is_terminal(AgentState state) noexcept {
            state == AgentState::cancelled;
 }
 
+const char *to_string(InvocationKind kind) noexcept {
+    switch (kind) {
+        case InvocationKind::model: return "MODEL";
+        case InvocationKind::tool: return "TOOL";
+    }
+    return "UNKNOWN";
+}
+
 bool AgentScheduler::submit(const AgentTaskSpec &task, std::string *error) {
     return submit_batch({task}, error);
 }
@@ -74,6 +82,22 @@ bool AgentScheduler::submit_batch_locked(const std::vector<AgentTaskSpec> &tasks
         if (task.id == kInvalidAgentId) {
             if (error != nullptr) {
                 *error = "agent id 0 is reserved";
+            }
+            return false;
+        }
+        if (!task.command.empty() && task.invocation.has_value()) {
+            if (error != nullptr) {
+                *error = "agent cannot contain both a command and an invocation";
+            }
+            return false;
+        }
+        if (task.invocation.has_value() &&
+            (task.invocation->target.empty() ||
+             task.invocation->operation.empty() ||
+             (task.invocation->kind != InvocationKind::model &&
+              task.invocation->kind != InvocationKind::tool))) {
+            if (error != nullptr) {
+                *error = "invocation kind, target, and operation are invalid";
             }
             return false;
         }
@@ -434,6 +458,34 @@ bool AgentScheduler::bind_context(AgentId id,
         return false;
     }
     it->second.snapshot.context_id = context_id;
+    return true;
+}
+
+bool AgentScheduler::bind_process(AgentId id,
+                                  std::int64_t process_id,
+                                  std::string *error) {
+    std::lock_guard lock(mutex_);
+    const auto it = nodes_.find(id);
+    if (it == nodes_.end() || is_terminal(it->second.snapshot.state) ||
+        process_id < 0) {
+        if (error != nullptr) *error = "cannot bind process to agent";
+        return false;
+    }
+    it->second.snapshot.process_id = process_id;
+    return true;
+}
+
+bool AgentScheduler::record_metrics(
+    AgentId id,
+    const AgentPerformanceMetrics &metrics,
+    std::string *error) {
+    std::lock_guard lock(mutex_);
+    const auto it = nodes_.find(id);
+    if (it == nodes_.end() || is_terminal(it->second.snapshot.state)) {
+        if (error != nullptr) *error = "cannot record metrics for agent";
+        return false;
+    }
+    it->second.snapshot.metrics = metrics;
     return true;
 }
 

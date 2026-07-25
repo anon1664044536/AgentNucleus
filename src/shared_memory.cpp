@@ -249,6 +249,17 @@ int SharedMemoryRegion::descriptor() const noexcept {
     return descriptor_;
 }
 
+int SharedMemoryRegion::release_descriptor() noexcept {
+    if (address_ != nullptr && size_ > 0) {
+        munmap(address_, size_);
+    }
+    address_ = nullptr;
+    size_ = 0;
+    region_id_ = 0;
+    read_only_ = false;
+    return std::exchange(descriptor_, -1);
+}
+
 std::uint64_t SharedMemoryRegion::region_id() const noexcept {
     return region_id_;
 }

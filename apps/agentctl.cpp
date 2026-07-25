@@ -9,6 +9,7 @@
 #include <system_error>
 #include <thread>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "agent_runtime/control_channel.h"
@@ -24,6 +25,9 @@ void usage() {
         << "  ping\n"
         << "  submit ID NAME [OPTIONS] -- PROGRAM [ARGS...]\n"
         << "  spawn PARENT_ID ID NAME [OPTIONS] -- PROGRAM [ARGS...]\n"
+        << "  invoke ID NAME model|tool TARGET OPERATION [OPTIONS] -- PAYLOAD\n"
+        << "  spawn-invoke PARENT_ID ID NAME model|tool TARGET OPERATION\n"
+        << "               [OPTIONS] -- PAYLOAD\n"
         << "  status ID\n"
         << "  list\n"
         << "  wait ID [TIMEOUT_MS]\n"
@@ -33,7 +37,8 @@ void usage() {
         << "  shutdown\n"
         << "task options:\n"
         << "  --depends ID,ID  --priority N  --cpu N\n"
-        << "  --memory-mib N   --timeout-ms N --retries N\n";
+        << "  --memory-mib N   --timeout-ms N --retries N\n"
+        << "  --context ID     (invocation tasks only)\n";
 }
 
 template <typename T>
@@ -69,6 +74,7 @@ bool parse_task_options(int argc,
                         char **argv,
                         int *index,
                         ar::AgentTaskSpec *task,
+                        bool parse_command,
                         std::string *error) {
     while (*index < argc && std::string(argv[*index]) != "--") {
         const std::string option = argv[(*index)++];
@@ -115,6 +121,12 @@ bool parse_task_options(int argc,
                 *error = "invalid retry count";
                 return false;
             }
+        } else if (option == "--context") {
+            if (!task->invocation.has_value() ||
+                !parse_unsigned(value, &task->invocation->context_id)) {
+                *error = "invalid invocation context id";
+                return false;
+            }
         } else {
             *error = "unknown task option: " + option;
             return false;
@@ -125,23 +137,47 @@ bool parse_task_options(int argc,
         return false;
     }
     ++(*index);
-    while (*index < argc) task->command.emplace_back(argv[(*index)++]);
-    if (task->command.empty()) {
-        *error = "task command is empty";
-        return false;
+    if (parse_command) {
+        while (*index < argc) task->command.emplace_back(argv[(*index)++]);
+        if (task->command.empty()) {
+            *error = "task command is empty";
+            return false;
+        }
+        task->kind = "command";
+    } else {
+        std::string payload;
+        while (*index < argc) {
+            if (!payload.empty()) payload.push_back(' ');
+            payload.append(argv[(*index)++]);
+        }
+        task->invocation->payload = std::move(payload);
+        task->kind = "invocation";
     }
-    task->kind = "command";
     return true;
 }
 
 void print_agents(const std::vector<ar::ControlAgentInfo> &agents) {
     std::cout << std::left << std::setw(8) << "ID" << std::setw(8) << "PARENT"
-              << std::setw(10) << "PID" << std::setw(22) << "STATE" << "NAME\n";
+              << std::setw(10) << "PID" << std::setw(22) << "STATE"
+              << std::setw(14) << "KIND" << std::setw(10) << "CONTEXT"
+              << "NAME\n";
     for (const auto &agent : agents) {
         std::cout << std::left << std::setw(8) << agent.id << std::setw(8)
                   << agent.parent_id << std::setw(10) << agent.process_id
-                  << std::setw(22) << ar::to_string(agent.state) << agent.name;
+                  << std::setw(22) << ar::to_string(agent.state)
+                  << std::setw(14) << agent.kind << std::setw(10)
+                  << agent.context_id << agent.name;
         if (!agent.error.empty()) std::cout << "  error=" << agent.error;
+        if (agent.metrics.execution_time_us != 0 ||
+            agent.metrics.input_tokens != 0 ||
+            agent.metrics.output_tokens != 0) {
+            std::cout << "  exec_us=" << agent.metrics.execution_time_us
+                      << " input_tokens=" << agent.metrics.input_tokens
+                      << " output_tokens=" << agent.metrics.output_tokens
+                      << " cache_hit="
+                      << (agent.metrics.cache_hit ? "yes" : "no")
+                      << " reused_tokens=" << agent.metrics.reused_tokens;
+        }
         std::cout << '\n';
     }
 }
@@ -207,10 +243,15 @@ int main(int argc, char **argv) {
         } else {
             request.operation = ar::ControlOperation::status;
         }
-    } else if (command == "submit" || command == "spawn") {
-        request.operation = command == "spawn" ? ar::ControlOperation::spawn
-                                                 : ar::ControlOperation::submit;
-        if (command == "spawn") {
+    } else if (command == "submit" || command == "spawn" ||
+               command == "invoke" || command == "spawn-invoke") {
+        const bool spawn =
+            command == "spawn" || command == "spawn-invoke";
+        const bool invocation =
+            command == "invoke" || command == "spawn-invoke";
+        request.operation = spawn ? ar::ControlOperation::spawn
+                                  : ar::ControlOperation::submit;
+        if (spawn) {
             if (index >= argc ||
                 !parse_unsigned(std::string(argv[index++]), &request.target_id)) {
                 std::cerr << "invalid parent agent id\n";
@@ -224,7 +265,32 @@ int main(int argc, char **argv) {
             return 2;
         }
         request.task.name = argv[index++];
-        if (!parse_task_options(argc, argv, &index, &request.task, &parse_error)) {
+        if (invocation) {
+            if (index + 2 >= argc) {
+                std::cerr << "invocation kind, target, and operation are required\n";
+                return 2;
+            }
+            const std::string invocation_kind = argv[index++];
+            ar::InvocationSpec spec;
+            if (invocation_kind == "model") {
+                spec.kind = ar::InvocationKind::model;
+            } else if (invocation_kind == "tool") {
+                spec.kind = ar::InvocationKind::tool;
+            } else {
+                std::cerr << "invocation kind must be model or tool\n";
+                return 2;
+            }
+            spec.target = argv[index++];
+            spec.operation = argv[index++];
+            request.task.invocation = std::move(spec);
+        }
+        if (!parse_task_options(
+                argc,
+                argv,
+                &index,
+                &request.task,
+                !invocation,
+                &parse_error)) {
             std::cerr << parse_error << '\n';
             return 2;
         }

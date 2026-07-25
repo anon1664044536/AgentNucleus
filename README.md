@@ -29,6 +29,9 @@ inside openKylin, a Linux virtual machine, WSL2, or a remote Linux machine.
   and shutdown commands
 - Bounded command `stdout`/`stderr` capture into immutable `memfd` results
 - Zero-copy result retrieval through `SharedBufferRef` and `SCM_RIGHTS`
+- Versioned model/tool invocation protocol for `agent_runtime_top`
+- Automatic read-only `memfd` attachment of dependency results
+- Context-ID binding and cache/token/latency metrics returned by the backend
 
 ## Directory layout
 
@@ -39,6 +42,8 @@ agent-runtime/
 |  |- cgroup_manager.h
 |  |- control_channel.h
 |  |- control_protocol.h
+|  |- invocation_channel.h
+|  |- invocation_protocol.h
 |  |- model_engine.h
 |  |- process_executor.h
 |  |- resource_monitor.h
@@ -52,6 +57,55 @@ agent-runtime/
 |- examples/
 `- tests/
 ```
+
+## Connect the inference and tool layer
+
+`agent-runtime` owns Agent scheduling, resource admission, cancellation,
+dependency state and result lifetime. `agent_runtime_top` owns model sessions,
+KV Cache reuse/compression/isolation and concrete tool implementations. The
+two layers communicate over a local `SOCK_SEQPACKET` Unix socket instead of
+linking their internal schedulers together.
+
+Run the included bridge stub to verify the boundary:
+
+```bash
+./build/debug/agent_top_bridge_demo
+```
+
+Start the system runtime in another terminal:
+
+```bash
+./build/debug/agentd --serve --workers 4
+```
+
+Submit a producer followed by a model invocation:
+
+```bash
+./build/debug/agentctl submit 300 parse-request \
+  --timeout-ms 5000 -- \
+  /bin/sh -c 'printf "{\"intent\":\"power_query\"}"'
+
+./build/debug/agentctl invoke 301 generate-query \
+  model qwen2 generate \
+  --depends 300 --timeout-ms 10000 -- \
+  '{"prompt":"Generate a query"}'
+
+./build/debug/agentctl wait 301 15000
+./build/debug/agentctl status 301
+./build/debug/agentctl result 301
+```
+
+The result of Agent 300 is not copied into the invocation packet. `agentd`
+duplicates its sealed `memfd`, transfers the descriptor with `SCM_RIGHTS`, and
+the top process maps it read-only. The top process returns another `memfd`;
+`agentd` validates, shrinks, seals and publishes it through the existing
+result store.
+
+The same `invoke` command accepts `tool` instead of `model`, so model and tool
+calls share resource budgets, priorities, deadlines, cancellation and output
+handling. Use `--context ID` to continue a context previously returned by the
+top backend. Full protocol and adapter responsibilities are documented in
+[`docs/top-integration.md`](docs/top-integration.md).
 
 ## Build on openKylin
 
@@ -246,9 +300,9 @@ automatically when the runtime exits or when an entry is explicitly erased.
 
 ## Current scope
 
-This repository is an executable foundation, not a complete competition
-submission. The next layers should let dependent command Agents receive input
-descriptors automatically, connect llama token-generation handlers to the same
-result store, add context ownership/reference counting across process crashes,
-execution traces, context-locality scoring, and benchmark drivers for
-scheduling and IPC comparisons.
+This repository is an executable system substrate, not a complete competition
+submission. Dependency outputs and model/tool calls now cross the same
+shared-memory boundary. Real KV tensor sharing, compression policy and context
+reference counting remain the responsibility of `agent_runtime_top`; the
+competition submission still needs cross-layer benchmark drivers and
+openKylin/openEuler deployment measurements.

@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "agent_runtime/cgroup_manager.h"
+#include "agent_runtime/invocation_channel.h"
 #include "agent_runtime/process_executor.h"
 #include "agent_runtime/scheduler.h"
 #include "agent_runtime/shared_memory.h"
@@ -35,6 +36,7 @@ struct RuntimeConfig {
     bool enable_cgroups{false};
     std::string cgroup_root{"/sys/fs/cgroup/agent-runtime"};
     std::size_t max_agent_output_bytes{1024U * 1024U};
+    std::string invocation_socket{default_invocation_socket_path()};
 };
 
 class AgentRuntime {
@@ -66,6 +68,7 @@ public:
 private:
     void worker_loop();
     AgentExecutionResult execute(const AgentSnapshot &snapshot);
+    AgentExecutionResult execute_invocation(const AgentSnapshot &snapshot);
 
     RuntimeConfig config_;
     AgentScheduler scheduler_;

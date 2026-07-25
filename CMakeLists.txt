@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(agent_runtime
-    VERSION 0.2.0
+    VERSION 0.3.0
     DESCRIPTION "OS-oriented runtime for multi-agent workloads"
     LANGUAGES NONE)
 
@@ -38,6 +38,8 @@ add_library(agent_runtime
     src/cgroup_manager.cpp
     src/control_channel.cpp
     src/control_protocol.cpp
+    src/invocation_channel.cpp
+    src/invocation_protocol.cpp
     src/model_engine.cpp
     src/process_executor.cpp
     src/resource_monitor.cpp
@@ -124,6 +126,10 @@ if(AGENT_RUNTIME_BUILD_EXAMPLES)
 
     add_executable(agent_ipc_demo examples/ipc_demo.cpp)
     target_link_libraries(agent_ipc_demo PRIVATE agent_runtime::agent_runtime)
+
+    add_executable(agent_top_bridge_demo examples/top_bridge_demo.cpp)
+    target_link_libraries(agent_top_bridge_demo PRIVATE
+        agent_runtime::agent_runtime)
 endif()
 
 include(CTest)
@@ -149,6 +155,11 @@ if(BUILD_TESTING AND AGENT_RUNTIME_BUILD_TESTS)
     target_link_libraries(agent_control_plane_test PRIVATE
         agent_runtime::agent_runtime)
     add_test(NAME control_plane COMMAND agent_control_plane_test)
+
+    add_executable(agent_invocation_test tests/invocation_test.cpp)
+    target_link_libraries(agent_invocation_test PRIVATE
+        agent_runtime::agent_runtime)
+    add_test(NAME invocation COMMAND agent_invocation_test)
 endif()
 
 install(TARGETS agent_runtime agentd agentctl

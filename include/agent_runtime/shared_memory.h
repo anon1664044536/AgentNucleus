@@ -65,6 +65,7 @@ public:
     const void *data() const noexcept;
     std::size_t size() const noexcept;
     int descriptor() const noexcept;
+    int release_descriptor() noexcept;
     std::uint64_t region_id() const noexcept;
 
 private:
