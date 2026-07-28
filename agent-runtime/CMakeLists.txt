@@ -130,6 +130,10 @@ if(AGENT_RUNTIME_BUILD_EXAMPLES)
     add_executable(agent_top_bridge_demo examples/top_bridge_demo.cpp)
     target_link_libraries(agent_top_bridge_demo PRIVATE
         agent_runtime::agent_runtime)
+
+    add_executable(agent_mql_sql_demo examples/mql_sql_demo.cpp)
+    target_link_libraries(agent_mql_sql_demo PRIVATE
+        agent_runtime::agent_runtime)
 endif()
 
 include(CTest)

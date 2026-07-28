@@ -107,6 +107,27 @@ handling. Use `--context ID` to continue a context previously returned by the
 top backend. Full protocol and adapter responsibilities are documented in
 [`docs/top-integration.md`](docs/top-integration.md).
 
+## PMS MQL-to-SQL multi-Agent demo
+
+`agent_mql_sql_demo` implements the competition scenario as a real dependency
+graph:
+
+```text
+A: question -> MQL             \
+                                -> C: MQL + sub-schema -> MySQL
+B: question + pms_schema.sql -> sub-schema /
+```
+
+A and B have no dependency on each other and are submitted before C. C declares
+both Agent IDs as dependencies, so `agentd` blocks it until both producers
+complete. Their immutable outputs are passed to C as read-only `memfd` mappings;
+the client does not fetch and re-submit either intermediate result.
+
+The demo uses the real `agent_topd` model endpoint, prints state transitions and
+cache/token/latency metrics, and releases model contexts and result handles on
+exit. Build and deployment commands are in
+[`docs/pms-mql-sql-demo.md`](docs/pms-mql-sql-demo.md).
+
 ## Build on openKylin
 
 Install a C++20 compiler, CMake, and Ninja using the package manager available

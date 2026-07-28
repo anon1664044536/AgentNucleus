@@ -13,7 +13,7 @@
 extern "C" {
 #endif
 
-#define LLM_MAX_PROMPT 8192
+#define LLM_MAX_PROMPT 131072
 #define LLM_MAX_RESPONSE 4096
 #define LLM_MAX_MODEL_PATH 256
 
